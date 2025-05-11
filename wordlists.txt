@@ -3687,8 +3687,6 @@ siteimages
 sitemap
 site-map
 SiteMap
-sitemap
-sitemap
 sitemaps
 sitemgr
 sites
