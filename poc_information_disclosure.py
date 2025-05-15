@@ -1,56 +1,86 @@
-import asyncio
-import aiohttp
-import os
-from colorama import init, Fore
-
+import asyncio, aiohttp, os, sys
+from colorama import Fore, init
 init(autoreset=True)
 
-base_url = "https://targets.com/"
-payloads_file = "wordlists.txt"
-file_extensions = ["txt", "zip", "html", "php", "aspx", "tar", "tar.gz", "bak", "old"]
-MAX_CONNS = 20
-BATCH_SIZE = 500
+# ─────────── Config ───────────
+BASE_URL      = "https://targets.com/"
+WORDLIST_FILE = "wordlists.txt"
+EXTS          = ["txt","zip","xml","tar","tar.gz","bak","old"]
+MAX_CONNS     = 20
+BATCH_SIZE    = 500
+BAR_WIDTH     = 42
 
+# ─────── progress helpers ───────
+progress_lock = asyncio.Lock()
+done = 0
+
+def paint_bar(done_cnt, total_cnt):
+    pct  = int(done_cnt * 100 / total_cnt)
+    fill = int(BAR_WIDTH * done_cnt / total_cnt)
+    bar  = "=" * fill + "-" * (BAR_WIDTH - fill)
+    sys.stdout.write(Fore.LIGHTMAGENTA_EX + f"\rScanning: |{bar}| {pct:3}% ({done_cnt}/{total_cnt})")
+    sys.stdout.flush()
+
+async def tick(total_cnt):
+    global done
+    async with progress_lock:
+        done += 1
+        paint_bar(done, total_cnt)
+
+# ─────────── wordlist ───────────
 async def load_wordlists(path):
-    if os.path.exists(path):
-        with open(path) as f:
-            return [line.strip() for line in f if line.strip()]
-    print(Fore.RED + f"[!] File Not Found: {path}")
-    return []
+    if not os.path.exists(path):
+        print(Fore.RED + f"[!] File Not Found: {path}")
+        return []
+    with open(path, encoding="utf-8", errors="ignore") as f:
+        return [line.strip() for line in f if line.strip()]
 
-async def check_url(sem, session, dirname, ext):
-    url = f"{base_url.rstrip('/')}/{dirname}.{ext}"
+# ─────────── worker ────────────
+async def check_url(sem, session, url, total_cnt):
     async with sem:
         try:
+
             async with session.get(url, allow_redirects=False) as resp:
                 if resp.status == 200:
-                    print(Fore.GREEN + f"[+] Found: {dirname}.{ext} (200)")
+                    async with progress_lock:
+                        sys.stdout.write('\r\033[2K')
+                        sys.stdout.flush()
+                        print(Fore.GREEN + f"🟢 Found: {url} (200)")
+
         except Exception:
-
             pass
+        finally:
 
+            await tick(total_cnt)
+
+# ─────────── main ──────────────
 async def main():
-    names = await load_wordlists(payloads_file)
+    names = await load_wordlists(WORDLIST_FILE)
     if not names:
         return
 
-    sem = asyncio.Semaphore(MAX_CONNS)
-    connector = aiohttp.TCPConnector(limit=MAX_CONNS, keepalive_timeout=60)
+    targets = [f"{BASE_URL.rstrip('/')}/{dirname}.{extension_file}"
+               for dirname in names for extension_file in EXTS]
+    total_cnt = len(targets)
+    paint_bar(0, total_cnt)
+
+    sem  = asyncio.Semaphore(MAX_CONNS)
+    conn = aiohttp.TCPConnector(limit=MAX_CONNS, keepalive_timeout=60)
     timeout = aiohttp.ClientTimeout(total=None, connect=5)
-    async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
 
-        jobs = [(name, ext) for name in names for ext in file_extensions]
+    async with aiohttp.ClientSession(connector=conn, timeout=timeout) as sess:
+        for i in range(0, total_cnt, BATCH_SIZE):
+            batch = targets[i:i+BATCH_SIZE]
+            await asyncio.gather(
+                *(check_url(sem, sess, url, total_cnt) for url in batch),
+                return_exceptions=True
+            )
 
-        for i in range(0, len(jobs), BATCH_SIZE):
-            batch = jobs[i : i + BATCH_SIZE]    
-            tasks = [
-                check_url(sem, session, name, ext)
-                for name, ext in batch
-            ]
+    print("\n" + Fore.LIGHTBLUE_EX + "✔️  Scan completed.")
 
-            await asyncio.gather(*tasks, return_exceptions=True)
-
-        print(Fore.CYAN + "🟢 Scan completed.")
-
-if __name__ == "__main__":
-    asyncio.run(main())
+if __name__ == "__main__":       
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n" + Fore.LIGHTCYAN_EX + "🛑 Scan interrupted by user. Exiting cleanly.")
+        sys.exit(0)
